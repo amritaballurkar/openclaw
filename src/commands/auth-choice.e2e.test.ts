@@ -1,12 +1,21 @@
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { RuntimeEnv } from "../runtime.js";
 import type { WizardPrompter } from "../wizard/prompts.js";
 import type { AuthChoice } from "./onboard-types.js";
+import { captureEnv } from "../test-utils/env.js";
 import { applyAuthChoice, resolvePreferredProviderForAuthChoice } from "./auth-choice.js";
-import { ZAI_CODING_CN_BASE_URL, ZAI_CODING_GLOBAL_BASE_URL } from "./onboard-auth.js";
+import {
+  MINIMAX_CN_API_BASE_URL,
+  ZAI_CODING_CN_BASE_URL,
+  ZAI_CODING_GLOBAL_BASE_URL,
+} from "./onboard-auth.js";
+import {
+  createExitThrowingRuntime,
+  createWizardPrompter,
+  readAuthProfilesForAgent,
+  setupAuthTestEnv,
+} from "./test-wizard-helpers.js";
 
 vi.mock("../providers/github-copilot-auth.js", () => ({
   githubCopilotLoginCommand: vi.fn(async () => {}),
@@ -22,8 +31,6 @@ vi.mock("../plugins/providers.js", () => ({
   resolvePluginProviders,
 }));
 
-const noopAsync = async () => {};
-const noop = () => {};
 const authProfilePathFor = (agentDir: string) => path.join(agentDir, "auth-profiles.json");
 const requireAgentDir = () => {
   const agentDir = process.env.OPENCLAW_AGENT_DIR;
@@ -34,19 +41,36 @@ const requireAgentDir = () => {
 };
 
 describe("applyAuthChoice", () => {
-  const previousStateDir = process.env.OPENCLAW_STATE_DIR;
-  const previousAgentDir = process.env.OPENCLAW_AGENT_DIR;
-  const previousPiAgentDir = process.env.PI_CODING_AGENT_DIR;
-  const previousAnthropicKey = process.env.ANTHROPIC_API_KEY;
-  const previousOpenrouterKey = process.env.OPENROUTER_API_KEY;
-  const previousHfToken = process.env.HF_TOKEN;
-  const previousHfHubToken = process.env.HUGGINGFACE_HUB_TOKEN;
-  const previousLitellmKey = process.env.LITELLM_API_KEY;
-  const previousAiGatewayKey = process.env.AI_GATEWAY_API_KEY;
-  const previousCloudflareGatewayKey = process.env.CLOUDFLARE_AI_GATEWAY_API_KEY;
-  const previousSshTty = process.env.SSH_TTY;
-  const previousChutesClientId = process.env.CHUTES_CLIENT_ID;
+  const envSnapshot = captureEnv([
+    "OPENCLAW_STATE_DIR",
+    "OPENCLAW_AGENT_DIR",
+    "PI_CODING_AGENT_DIR",
+    "ANTHROPIC_API_KEY",
+    "OPENROUTER_API_KEY",
+    "HF_TOKEN",
+    "HUGGINGFACE_HUB_TOKEN",
+    "LITELLM_API_KEY",
+    "AI_GATEWAY_API_KEY",
+    "CLOUDFLARE_AI_GATEWAY_API_KEY",
+    "SSH_TTY",
+    "CHUTES_CLIENT_ID",
+  ]);
   let tempStateDir: string | null = null;
+  async function setupTempState() {
+    const env = await setupAuthTestEnv("openclaw-auth-");
+    tempStateDir = env.stateDir;
+  }
+  function createPrompter(overrides: Partial<WizardPrompter>): WizardPrompter {
+    return createWizardPrompter(overrides, { defaultSelect: "" });
+  }
+  async function readAuthProfiles() {
+    return await readAuthProfilesForAgent<{
+      profiles?: Record<
+        string,
+        { key?: string; access?: string; refresh?: string; provider?: string }
+      >;
+    }>(requireAgentDir());
+  }
 
   afterEach(async () => {
     vi.unstubAllGlobals();
@@ -57,93 +81,16 @@ describe("applyAuthChoice", () => {
       await fs.rm(tempStateDir, { recursive: true, force: true });
       tempStateDir = null;
     }
-    if (previousStateDir === undefined) {
-      delete process.env.OPENCLAW_STATE_DIR;
-    } else {
-      process.env.OPENCLAW_STATE_DIR = previousStateDir;
-    }
-    if (previousAgentDir === undefined) {
-      delete process.env.OPENCLAW_AGENT_DIR;
-    } else {
-      process.env.OPENCLAW_AGENT_DIR = previousAgentDir;
-    }
-    if (previousPiAgentDir === undefined) {
-      delete process.env.PI_CODING_AGENT_DIR;
-    } else {
-      process.env.PI_CODING_AGENT_DIR = previousPiAgentDir;
-    }
-    if (previousAnthropicKey === undefined) {
-      delete process.env.ANTHROPIC_API_KEY;
-    } else {
-      process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
-    }
-    if (previousOpenrouterKey === undefined) {
-      delete process.env.OPENROUTER_API_KEY;
-    } else {
-      process.env.OPENROUTER_API_KEY = previousOpenrouterKey;
-    }
-    if (previousHfToken === undefined) {
-      delete process.env.HF_TOKEN;
-    } else {
-      process.env.HF_TOKEN = previousHfToken;
-    }
-    if (previousHfHubToken === undefined) {
-      delete process.env.HUGGINGFACE_HUB_TOKEN;
-    } else {
-      process.env.HUGGINGFACE_HUB_TOKEN = previousHfHubToken;
-    }
-    if (previousLitellmKey === undefined) {
-      delete process.env.LITELLM_API_KEY;
-    } else {
-      process.env.LITELLM_API_KEY = previousLitellmKey;
-    }
-    if (previousAiGatewayKey === undefined) {
-      delete process.env.AI_GATEWAY_API_KEY;
-    } else {
-      process.env.AI_GATEWAY_API_KEY = previousAiGatewayKey;
-    }
-    if (previousCloudflareGatewayKey === undefined) {
-      delete process.env.CLOUDFLARE_AI_GATEWAY_API_KEY;
-    } else {
-      process.env.CLOUDFLARE_AI_GATEWAY_API_KEY = previousCloudflareGatewayKey;
-    }
-    if (previousSshTty === undefined) {
-      delete process.env.SSH_TTY;
-    } else {
-      process.env.SSH_TTY = previousSshTty;
-    }
-    if (previousChutesClientId === undefined) {
-      delete process.env.CHUTES_CLIENT_ID;
-    } else {
-      process.env.CHUTES_CLIENT_ID = previousChutesClientId;
-    }
+    envSnapshot.restore();
   });
 
   it("does not throw when openai-codex oauth fails", async () => {
-    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-auth-"));
-    process.env.OPENCLAW_STATE_DIR = tempStateDir;
-    process.env.OPENCLAW_AGENT_DIR = path.join(tempStateDir, "agent");
-    process.env.PI_CODING_AGENT_DIR = process.env.OPENCLAW_AGENT_DIR;
+    await setupTempState();
 
     loginOpenAICodexOAuth.mockRejectedValueOnce(new Error("oauth failed"));
 
-    const prompter: WizardPrompter = {
-      intro: vi.fn(noopAsync),
-      outro: vi.fn(noopAsync),
-      note: vi.fn(noopAsync),
-      select: vi.fn(async () => "" as never),
-      multiselect: vi.fn(async () => []),
-      text: vi.fn(async () => ""),
-      confirm: vi.fn(async () => false),
-      progress: vi.fn(() => ({ update: noop, stop: noop })),
-    };
-    const runtime: RuntimeEnv = {
-      log: vi.fn(),
-      error: vi.fn(),
-      exit: vi.fn((code: number) => {
-        throw new Error(`exit:${code}`);
-      }),
-    };
+    const prompter = createPrompter({});
+    const runtime = createExitThrowingRuntime();
 
     await expect(
       applyAuthChoice({
@@ -157,33 +104,15 @@ describe("applyAuthChoice", () => {
   });
 
   it("prompts and writes MiniMax API key when selecting minimax-api", async () => {
-    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-auth-"));
-    process.env.OPENCLAW_STATE_DIR = tempStateDir;
-    process.env.OPENCLAW_AGENT_DIR = path.join(tempStateDir, "agent");
-    process.env.PI_CODING_AGENT_DIR = process.env.OPENCLAW_AGENT_DIR;
+    await setupTempState();
 
     const text = vi.fn().mockResolvedValue("sk-minimax-test");
     const select: WizardPrompter["select"] = vi.fn(
       async (params) => params.options[0]?.value as never,
     );
     const multiselect: WizardPrompter["multiselect"] = vi.fn(async () => []);
-    const prompter: WizardPrompter = {
-      intro: vi.fn(noopAsync),
-      outro: vi.fn(noopAsync),
-      note: vi.fn(noopAsync),
-      select,
-      multiselect,
-      text,
-      confirm: vi.fn(async () => false),
-      progress: vi.fn(() => ({ update: noop, stop: noop })),
-    };
-    const runtime: RuntimeEnv = {
-      log: vi.fn(),
-      error: vi.fn(),
-      exit: vi.fn((code: number) => {
-        throw new Error(`exit:${code}`);
-      }),
-    };
+    const prompter = createPrompter({ select, multiselect, text });
+    const runtime = createExitThrowingRuntime();
 
     const result = await applyAuthChoice({
       authChoice: "minimax-api",
@@ -201,42 +130,56 @@ describe("applyAuthChoice", () => {
       mode: "api_key",
     });
 
-    const authProfilePath = authProfilePathFor(requireAgentDir());
-    const raw = await fs.readFile(authProfilePath, "utf8");
-    const parsed = JSON.parse(raw) as {
+    const parsed = (await readAuthProfiles()) as {
       profiles?: Record<string, { key?: string }>;
     };
     expect(parsed.profiles?.["minimax:default"]?.key).toBe("sk-minimax-test");
   });
 
+  it("prompts and writes MiniMax API key when selecting minimax-api-key-cn", async () => {
+    await setupTempState();
+
+    const text = vi.fn().mockResolvedValue("sk-minimax-test");
+    const select: WizardPrompter["select"] = vi.fn(
+      async (params) => params.options[0]?.value as never,
+    );
+    const multiselect: WizardPrompter["multiselect"] = vi.fn(async () => []);
+    const prompter = createPrompter({ select, multiselect, text });
+    const runtime = createExitThrowingRuntime();
+
+    const result = await applyAuthChoice({
+      authChoice: "minimax-api-key-cn",
+      config: {},
+      prompter,
+      runtime,
+      setDefaultModel: true,
+    });
+
+    expect(text).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "Enter MiniMax China API key" }),
+    );
+    expect(result.config.auth?.profiles?.["minimax-cn:default"]).toMatchObject({
+      provider: "minimax-cn",
+      mode: "api_key",
+    });
+    expect(result.config.models?.providers?.["minimax-cn"]?.baseUrl).toBe(MINIMAX_CN_API_BASE_URL);
+
+    const parsed = (await readAuthProfiles()) as {
+      profiles?: Record<string, { key?: string }>;
+    };
+    expect(parsed.profiles?.["minimax-cn:default"]?.key).toBe("sk-minimax-test");
+  });
+
   it("prompts and writes Synthetic API key when selecting synthetic-api-key", async () => {
-    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-auth-"));
-    process.env.OPENCLAW_STATE_DIR = tempStateDir;
-    process.env.OPENCLAW_AGENT_DIR = path.join(tempStateDir, "agent");
-    process.env.PI_CODING_AGENT_DIR = process.env.OPENCLAW_AGENT_DIR;
+    await setupTempState();
 
     const text = vi.fn().mockResolvedValue("sk-synthetic-test");
     const select: WizardPrompter["select"] = vi.fn(
       async (params) => params.options[0]?.value as never,
     );
     const multiselect: WizardPrompter["multiselect"] = vi.fn(async () => []);
-    const prompter: WizardPrompter = {
-      intro: vi.fn(noopAsync),
-      outro: vi.fn(noopAsync),
-      note: vi.fn(noopAsync),
-      select,
-      multiselect,
-      text,
-      confirm: vi.fn(async () => false),
-      progress: vi.fn(() => ({ update: noop, stop: noop })),
-    };
-    const runtime: RuntimeEnv = {
-      log: vi.fn(),
-      error: vi.fn(),
-      exit: vi.fn((code: number) => {
-        throw new Error(`exit:${code}`);
-      }),
-    };
+    const prompter = createPrompter({ select, multiselect, text });
+    const runtime = createExitThrowingRuntime();
 
     const result = await applyAuthChoice({
       authChoice: "synthetic-api-key",
@@ -254,42 +197,22 @@ describe("applyAuthChoice", () => {
       mode: "api_key",
     });
 
-    const authProfilePath = authProfilePathFor(requireAgentDir());
-    const raw = await fs.readFile(authProfilePath, "utf8");
-    const parsed = JSON.parse(raw) as {
+    const parsed = (await readAuthProfiles()) as {
       profiles?: Record<string, { key?: string }>;
     };
     expect(parsed.profiles?.["synthetic:default"]?.key).toBe("sk-synthetic-test");
   });
 
   it("prompts and writes Hugging Face API key when selecting huggingface-api-key", async () => {
-    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-auth-"));
-    process.env.OPENCLAW_STATE_DIR = tempStateDir;
-    process.env.OPENCLAW_AGENT_DIR = path.join(tempStateDir, "agent");
-    process.env.PI_CODING_AGENT_DIR = process.env.OPENCLAW_AGENT_DIR;
+    await setupTempState();
 
     const text = vi.fn().mockResolvedValue("hf-test-token");
     const select: WizardPrompter["select"] = vi.fn(
       async (params) => params.options[0]?.value as never,
     );
     const multiselect: WizardPrompter["multiselect"] = vi.fn(async () => []);
-    const prompter: WizardPrompter = {
-      intro: vi.fn(noopAsync),
-      outro: vi.fn(noopAsync),
-      note: vi.fn(noopAsync),
-      select,
-      multiselect,
-      text,
-      confirm: vi.fn(async () => false),
-      progress: vi.fn(() => ({ update: noop, stop: noop })),
-    };
-    const runtime: RuntimeEnv = {
-      log: vi.fn(),
-      error: vi.fn(),
-      exit: vi.fn((code: number) => {
-        throw new Error(`exit:${code}`);
-      }),
-    };
+    const prompter = createPrompter({ select, multiselect, text });
+    const runtime = createExitThrowingRuntime();
 
     const result = await applyAuthChoice({
       authChoice: "huggingface-api-key",
@@ -308,19 +231,14 @@ describe("applyAuthChoice", () => {
     });
     expect(result.config.agents?.defaults?.model?.primary).toMatch(/^huggingface\/.+/);
 
-    const authProfilePath = authProfilePathFor(requireAgentDir());
-    const raw = await fs.readFile(authProfilePath, "utf8");
-    const parsed = JSON.parse(raw) as {
+    const parsed = (await readAuthProfiles()) as {
       profiles?: Record<string, { key?: string }>;
     };
     expect(parsed.profiles?.["huggingface:default"]?.key).toBe("hf-test-token");
   });
 
   it("prompts for Z.AI endpoint when selecting zai-api-key", async () => {
-    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-auth-"));
-    process.env.OPENCLAW_STATE_DIR = tempStateDir;
-    process.env.OPENCLAW_AGENT_DIR = path.join(tempStateDir, "agent");
-    process.env.PI_CODING_AGENT_DIR = process.env.OPENCLAW_AGENT_DIR;
+    await setupTempState();
 
     const text = vi.fn().mockResolvedValue("zai-test-key");
     const select = vi.fn(async (params: { message: string }) => {
@@ -330,23 +248,12 @@ describe("applyAuthChoice", () => {
       return "default";
     });
     const multiselect: WizardPrompter["multiselect"] = vi.fn(async () => []);
-    const prompter: WizardPrompter = {
-      intro: vi.fn(noopAsync),
-      outro: vi.fn(noopAsync),
-      note: vi.fn(noopAsync),
+    const prompter = createPrompter({
       select: select as WizardPrompter["select"],
       multiselect,
       text,
-      confirm: vi.fn(async () => false),
-      progress: vi.fn(() => ({ update: noop, stop: noop })),
-    };
-    const runtime: RuntimeEnv = {
-      log: vi.fn(),
-      error: vi.fn(),
-      exit: vi.fn((code: number) => {
-        throw new Error(`exit:${code}`);
-      }),
-    };
+    });
+    const runtime = createExitThrowingRuntime();
 
     const result = await applyAuthChoice({
       authChoice: "zai-api-key",
@@ -362,40 +269,24 @@ describe("applyAuthChoice", () => {
     expect(result.config.models?.providers?.zai?.baseUrl).toBe(ZAI_CODING_CN_BASE_URL);
     expect(result.config.agents?.defaults?.model?.primary).toBe("zai/glm-5");
 
-    const authProfilePath = authProfilePathFor(requireAgentDir());
-    const raw = await fs.readFile(authProfilePath, "utf8");
-    const parsed = JSON.parse(raw) as {
+    const parsed = (await readAuthProfiles()) as {
       profiles?: Record<string, { key?: string }>;
     };
     expect(parsed.profiles?.["zai:default"]?.key).toBe("zai-test-key");
   });
 
   it("uses endpoint-specific auth choice without prompting for Z.AI endpoint", async () => {
-    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-auth-"));
-    process.env.OPENCLAW_STATE_DIR = tempStateDir;
-    process.env.OPENCLAW_AGENT_DIR = path.join(tempStateDir, "agent");
-    process.env.PI_CODING_AGENT_DIR = process.env.OPENCLAW_AGENT_DIR;
+    await setupTempState();
 
     const text = vi.fn().mockResolvedValue("zai-test-key");
     const select = vi.fn(async () => "default");
     const multiselect: WizardPrompter["multiselect"] = vi.fn(async () => []);
-    const prompter: WizardPrompter = {
-      intro: vi.fn(noopAsync),
-      outro: vi.fn(noopAsync),
-      note: vi.fn(noopAsync),
+    const prompter = createPrompter({
       select: select as WizardPrompter["select"],
       multiselect,
       text,
-      confirm: vi.fn(async () => false),
-      progress: vi.fn(() => ({ update: noop, stop: noop })),
-    };
-    const runtime: RuntimeEnv = {
-      log: vi.fn(),
-      error: vi.fn(),
-      exit: vi.fn((code: number) => {
-        throw new Error(`exit:${code}`);
-      }),
-    };
+    });
+    const runtime = createExitThrowingRuntime();
 
     const result = await applyAuthChoice({
       authChoice: "zai-coding-global",
@@ -412,10 +303,7 @@ describe("applyAuthChoice", () => {
   });
 
   it("maps apiKey + tokenProvider=huggingface to huggingface-api-key flow", async () => {
-    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-auth-"));
-    process.env.OPENCLAW_STATE_DIR = tempStateDir;
-    process.env.OPENCLAW_AGENT_DIR = path.join(tempStateDir, "agent");
-    process.env.PI_CODING_AGENT_DIR = process.env.OPENCLAW_AGENT_DIR;
+    await setupTempState();
     delete process.env.HF_TOKEN;
     delete process.env.HUGGINGFACE_HUB_TOKEN;
 
@@ -425,23 +313,8 @@ describe("applyAuthChoice", () => {
     );
     const multiselect: WizardPrompter["multiselect"] = vi.fn(async () => []);
     const confirm = vi.fn(async () => false);
-    const prompter: WizardPrompter = {
-      intro: vi.fn(noopAsync),
-      outro: vi.fn(noopAsync),
-      note: vi.fn(noopAsync),
-      select,
-      multiselect,
-      text,
-      confirm,
-      progress: vi.fn(() => ({ update: noop, stop: noop })),
-    };
-    const runtime: RuntimeEnv = {
-      log: vi.fn(),
-      error: vi.fn(),
-      exit: vi.fn((code: number) => {
-        throw new Error(`exit:${code}`);
-      }),
-    };
+    const prompter = createPrompter({ select, multiselect, text, confirm });
+    const runtime = createExitThrowingRuntime();
 
     const result = await applyAuthChoice({
       authChoice: "apiKey",
@@ -462,41 +335,21 @@ describe("applyAuthChoice", () => {
     expect(result.config.agents?.defaults?.model?.primary).toMatch(/^huggingface\/.+/);
     expect(text).not.toHaveBeenCalled();
 
-    const authProfilePath = authProfilePathFor(requireAgentDir());
-    const raw = await fs.readFile(authProfilePath, "utf8");
-    const parsed = JSON.parse(raw) as {
+    const parsed = (await readAuthProfiles()) as {
       profiles?: Record<string, { key?: string }>;
     };
     expect(parsed.profiles?.["huggingface:default"]?.key).toBe("hf-token-provider-test");
   });
   it("does not override the global default model when selecting xai-api-key without setDefaultModel", async () => {
-    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-auth-"));
-    process.env.OPENCLAW_STATE_DIR = tempStateDir;
-    process.env.OPENCLAW_AGENT_DIR = path.join(tempStateDir, "agent");
-    process.env.PI_CODING_AGENT_DIR = process.env.OPENCLAW_AGENT_DIR;
+    await setupTempState();
 
     const text = vi.fn().mockResolvedValue("sk-xai-test");
     const select: WizardPrompter["select"] = vi.fn(
       async (params) => params.options[0]?.value as never,
     );
     const multiselect: WizardPrompter["multiselect"] = vi.fn(async () => []);
-    const prompter: WizardPrompter = {
-      intro: vi.fn(noopAsync),
-      outro: vi.fn(noopAsync),
-      note: vi.fn(noopAsync),
-      select,
-      multiselect,
-      text,
-      confirm: vi.fn(async () => false),
-      progress: vi.fn(() => ({ update: noop, stop: noop })),
-    };
-    const runtime: RuntimeEnv = {
-      log: vi.fn(),
-      error: vi.fn(),
-      exit: vi.fn((code: number) => {
-        throw new Error(`exit:${code}`);
-      }),
-    };
+    const prompter = createPrompter({ select, multiselect, text });
+    const runtime = createExitThrowingRuntime();
 
     const result = await applyAuthChoice({
       authChoice: "xai-api-key",
@@ -515,37 +368,17 @@ describe("applyAuthChoice", () => {
     expect(result.config.agents?.defaults?.model?.primary).toBe("openai/gpt-4o-mini");
     expect(result.agentModelOverride).toBe("xai/grok-4");
 
-    const authProfilePath = authProfilePathFor(requireAgentDir());
-    const raw = await fs.readFile(authProfilePath, "utf8");
-    const parsed = JSON.parse(raw) as {
+    const parsed = (await readAuthProfiles()) as {
       profiles?: Record<string, { key?: string }>;
     };
     expect(parsed.profiles?.["xai:default"]?.key).toBe("sk-xai-test");
   });
 
   it("sets default model when selecting github-copilot", async () => {
-    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-auth-"));
-    process.env.OPENCLAW_STATE_DIR = tempStateDir;
-    process.env.OPENCLAW_AGENT_DIR = path.join(tempStateDir, "agent");
-    process.env.PI_CODING_AGENT_DIR = process.env.OPENCLAW_AGENT_DIR;
+    await setupTempState();
 
-    const prompter: WizardPrompter = {
-      intro: vi.fn(noopAsync),
-      outro: vi.fn(noopAsync),
-      note: vi.fn(noopAsync),
-      select: vi.fn(async () => "" as never),
-      multiselect: vi.fn(async () => []),
-      text: vi.fn(async () => ""),
-      confirm: vi.fn(async () => false),
-      progress: vi.fn(() => ({ update: noop, stop: noop })),
-    };
-    const runtime: RuntimeEnv = {
-      log: vi.fn(),
-      error: vi.fn(),
-      exit: vi.fn((code: number) => {
-        throw new Error(`exit:${code}`);
-      }),
-    };
+    const prompter = createPrompter({});
+    const runtime = createExitThrowingRuntime();
 
     const stdin = process.stdin as NodeJS.ReadStream & { isTTY?: boolean };
     const hadOwnIsTTY = Object.prototype.hasOwnProperty.call(stdin, "isTTY");
@@ -576,33 +409,15 @@ describe("applyAuthChoice", () => {
   });
 
   it("does not override the default model when selecting opencode-zen without setDefaultModel", async () => {
-    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-auth-"));
-    process.env.OPENCLAW_STATE_DIR = tempStateDir;
-    process.env.OPENCLAW_AGENT_DIR = path.join(tempStateDir, "agent");
-    process.env.PI_CODING_AGENT_DIR = process.env.OPENCLAW_AGENT_DIR;
+    await setupTempState();
 
     const text = vi.fn().mockResolvedValue("sk-opencode-zen-test");
     const select: WizardPrompter["select"] = vi.fn(
       async (params) => params.options[0]?.value as never,
     );
     const multiselect: WizardPrompter["multiselect"] = vi.fn(async () => []);
-    const prompter: WizardPrompter = {
-      intro: vi.fn(noopAsync),
-      outro: vi.fn(noopAsync),
-      note: vi.fn(noopAsync),
-      select,
-      multiselect,
-      text,
-      confirm: vi.fn(async () => false),
-      progress: vi.fn(() => ({ update: noop, stop: noop })),
-    };
-    const runtime: RuntimeEnv = {
-      log: vi.fn(),
-      error: vi.fn(),
-      exit: vi.fn((code: number) => {
-        throw new Error(`exit:${code}`);
-      }),
-    };
+    const prompter = createPrompter({ select, multiselect, text });
+    const runtime = createExitThrowingRuntime();
 
     const result = await applyAuthChoice({
       authChoice: "opencode-zen",
@@ -627,30 +442,12 @@ describe("applyAuthChoice", () => {
   });
 
   it("does not persist literal 'undefined' when Anthropic API key prompt returns undefined", async () => {
-    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-auth-"));
-    process.env.OPENCLAW_STATE_DIR = tempStateDir;
-    process.env.OPENCLAW_AGENT_DIR = path.join(tempStateDir, "agent");
-    process.env.PI_CODING_AGENT_DIR = process.env.OPENCLAW_AGENT_DIR;
+    await setupTempState();
     delete process.env.ANTHROPIC_API_KEY;
 
     const text = vi.fn(async () => undefined as unknown as string);
-    const prompter: WizardPrompter = {
-      intro: vi.fn(noopAsync),
-      outro: vi.fn(noopAsync),
-      note: vi.fn(noopAsync),
-      select: vi.fn(async () => "" as never),
-      multiselect: vi.fn(async () => []),
-      text,
-      confirm: vi.fn(async () => false),
-      progress: vi.fn(() => ({ update: noop, stop: noop })),
-    };
-    const runtime: RuntimeEnv = {
-      log: vi.fn(),
-      error: vi.fn(),
-      exit: vi.fn((code: number) => {
-        throw new Error(`exit:${code}`);
-      }),
-    };
+    const prompter = createPrompter({ text });
+    const runtime = createExitThrowingRuntime();
 
     const result = await applyAuthChoice({
       authChoice: "apiKey",
@@ -665,9 +462,7 @@ describe("applyAuthChoice", () => {
       mode: "api_key",
     });
 
-    const authProfilePath = authProfilePathFor(requireAgentDir());
-    const raw = await fs.readFile(authProfilePath, "utf8");
-    const parsed = JSON.parse(raw) as {
+    const parsed = (await readAuthProfiles()) as {
       profiles?: Record<string, { key?: string }>;
     };
     expect(parsed.profiles?.["anthropic:default"]?.key).toBe("");
@@ -675,30 +470,12 @@ describe("applyAuthChoice", () => {
   });
 
   it("does not persist literal 'undefined' when OpenRouter API key prompt returns undefined", async () => {
-    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-auth-"));
-    process.env.OPENCLAW_STATE_DIR = tempStateDir;
-    process.env.OPENCLAW_AGENT_DIR = path.join(tempStateDir, "agent");
-    process.env.PI_CODING_AGENT_DIR = process.env.OPENCLAW_AGENT_DIR;
+    await setupTempState();
     delete process.env.OPENROUTER_API_KEY;
 
     const text = vi.fn(async () => undefined as unknown as string);
-    const prompter: WizardPrompter = {
-      intro: vi.fn(noopAsync),
-      outro: vi.fn(noopAsync),
-      note: vi.fn(noopAsync),
-      select: vi.fn(async () => "" as never),
-      multiselect: vi.fn(async () => []),
-      text,
-      confirm: vi.fn(async () => false),
-      progress: vi.fn(() => ({ update: noop, stop: noop })),
-    };
-    const runtime: RuntimeEnv = {
-      log: vi.fn(),
-      error: vi.fn(),
-      exit: vi.fn((code: number) => {
-        throw new Error(`exit:${code}`);
-      }),
-    };
+    const prompter = createPrompter({ text });
+    const runtime = createExitThrowingRuntime();
 
     const result = await applyAuthChoice({
       authChoice: "openrouter-api-key",
@@ -713,9 +490,7 @@ describe("applyAuthChoice", () => {
       mode: "api_key",
     });
 
-    const authProfilePath = authProfilePathFor(requireAgentDir());
-    const raw = await fs.readFile(authProfilePath, "utf8");
-    const parsed = JSON.parse(raw) as {
+    const parsed = (await readAuthProfiles()) as {
       profiles?: Record<string, { key?: string }>;
     };
     expect(parsed.profiles?.["openrouter:default"]?.key).toBe("");
@@ -723,10 +498,7 @@ describe("applyAuthChoice", () => {
   });
 
   it("uses existing OPENROUTER_API_KEY when selecting openrouter-api-key", async () => {
-    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-auth-"));
-    process.env.OPENCLAW_STATE_DIR = tempStateDir;
-    process.env.OPENCLAW_AGENT_DIR = path.join(tempStateDir, "agent");
-    process.env.PI_CODING_AGENT_DIR = process.env.OPENCLAW_AGENT_DIR;
+    await setupTempState();
     process.env.OPENROUTER_API_KEY = "sk-openrouter-test";
 
     const text = vi.fn();
@@ -735,23 +507,8 @@ describe("applyAuthChoice", () => {
     );
     const multiselect: WizardPrompter["multiselect"] = vi.fn(async () => []);
     const confirm = vi.fn(async () => true);
-    const prompter: WizardPrompter = {
-      intro: vi.fn(noopAsync),
-      outro: vi.fn(noopAsync),
-      note: vi.fn(noopAsync),
-      select,
-      multiselect,
-      text,
-      confirm,
-      progress: vi.fn(() => ({ update: noop, stop: noop })),
-    };
-    const runtime: RuntimeEnv = {
-      log: vi.fn(),
-      error: vi.fn(),
-      exit: vi.fn((code: number) => {
-        throw new Error(`exit:${code}`);
-      }),
-    };
+    const prompter = createPrompter({ select, multiselect, text, confirm });
+    const runtime = createExitThrowingRuntime();
 
     const result = await applyAuthChoice({
       authChoice: "openrouter-api-key",
@@ -773,9 +530,7 @@ describe("applyAuthChoice", () => {
     });
     expect(result.config.agents?.defaults?.model?.primary).toBe("openrouter/auto");
 
-    const authProfilePath = authProfilePathFor(requireAgentDir());
-    const raw = await fs.readFile(authProfilePath, "utf8");
-    const parsed = JSON.parse(raw) as {
+    const parsed = (await readAuthProfiles()) as {
       profiles?: Record<string, { key?: string }>;
     };
     expect(parsed.profiles?.["openrouter:default"]?.key).toBe("sk-openrouter-test");
@@ -784,10 +539,7 @@ describe("applyAuthChoice", () => {
   });
 
   it("ignores legacy LiteLLM oauth profiles when selecting litellm-api-key", async () => {
-    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-auth-"));
-    process.env.OPENCLAW_STATE_DIR = tempStateDir;
-    process.env.OPENCLAW_AGENT_DIR = path.join(tempStateDir, "agent");
-    process.env.PI_CODING_AGENT_DIR = process.env.OPENCLAW_AGENT_DIR;
+    await setupTempState();
     process.env.LITELLM_API_KEY = "sk-litellm-test";
 
     const authProfilePath = authProfilePathFor(requireAgentDir());
@@ -819,23 +571,8 @@ describe("applyAuthChoice", () => {
     );
     const multiselect: WizardPrompter["multiselect"] = vi.fn(async () => []);
     const confirm = vi.fn(async () => true);
-    const prompter: WizardPrompter = {
-      intro: vi.fn(noopAsync),
-      outro: vi.fn(noopAsync),
-      note: vi.fn(noopAsync),
-      select,
-      multiselect,
-      text,
-      confirm,
-      progress: vi.fn(() => ({ update: noop, stop: noop })),
-    };
-    const runtime: RuntimeEnv = {
-      log: vi.fn(),
-      error: vi.fn(),
-      exit: vi.fn((code: number) => {
-        throw new Error(`exit:${code}`);
-      }),
-    };
+    const prompter = createPrompter({ select, multiselect, text, confirm });
+    const runtime = createExitThrowingRuntime();
 
     const result = await applyAuthChoice({
       authChoice: "litellm-api-key",
@@ -863,8 +600,7 @@ describe("applyAuthChoice", () => {
       mode: "api_key",
     });
 
-    const raw = await fs.readFile(authProfilePath, "utf8");
-    const parsed = JSON.parse(raw) as {
+    const parsed = (await readAuthProfiles()) as {
       profiles?: Record<string, { type?: string; key?: string }>;
     };
     expect(parsed.profiles?.["litellm:default"]).toMatchObject({
@@ -874,10 +610,7 @@ describe("applyAuthChoice", () => {
   });
 
   it("uses existing AI_GATEWAY_API_KEY when selecting ai-gateway-api-key", async () => {
-    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-auth-"));
-    process.env.OPENCLAW_STATE_DIR = tempStateDir;
-    process.env.OPENCLAW_AGENT_DIR = path.join(tempStateDir, "agent");
-    process.env.PI_CODING_AGENT_DIR = process.env.OPENCLAW_AGENT_DIR;
+    await setupTempState();
     process.env.AI_GATEWAY_API_KEY = "gateway-test-key";
 
     const text = vi.fn();
@@ -886,23 +619,8 @@ describe("applyAuthChoice", () => {
     );
     const multiselect: WizardPrompter["multiselect"] = vi.fn(async () => []);
     const confirm = vi.fn(async () => true);
-    const prompter: WizardPrompter = {
-      intro: vi.fn(noopAsync),
-      outro: vi.fn(noopAsync),
-      note: vi.fn(noopAsync),
-      select,
-      multiselect,
-      text,
-      confirm,
-      progress: vi.fn(() => ({ update: noop, stop: noop })),
-    };
-    const runtime: RuntimeEnv = {
-      log: vi.fn(),
-      error: vi.fn(),
-      exit: vi.fn((code: number) => {
-        throw new Error(`exit:${code}`);
-      }),
-    };
+    const prompter = createPrompter({ select, multiselect, text, confirm });
+    const runtime = createExitThrowingRuntime();
 
     const result = await applyAuthChoice({
       authChoice: "ai-gateway-api-key",
@@ -926,9 +644,7 @@ describe("applyAuthChoice", () => {
       "vercel-ai-gateway/anthropic/claude-opus-4.6",
     );
 
-    const authProfilePath = authProfilePathFor(requireAgentDir());
-    const raw = await fs.readFile(authProfilePath, "utf8");
-    const parsed = JSON.parse(raw) as {
+    const parsed = (await readAuthProfiles()) as {
       profiles?: Record<string, { key?: string }>;
     };
     expect(parsed.profiles?.["vercel-ai-gateway:default"]?.key).toBe("gateway-test-key");
@@ -937,10 +653,7 @@ describe("applyAuthChoice", () => {
   });
 
   it("uses existing CLOUDFLARE_AI_GATEWAY_API_KEY when selecting cloudflare-ai-gateway-api-key", async () => {
-    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-auth-"));
-    process.env.OPENCLAW_STATE_DIR = tempStateDir;
-    process.env.OPENCLAW_AGENT_DIR = path.join(tempStateDir, "agent");
-    process.env.PI_CODING_AGENT_DIR = process.env.OPENCLAW_AGENT_DIR;
+    await setupTempState();
     process.env.CLOUDFLARE_AI_GATEWAY_API_KEY = "cf-gateway-test-key";
 
     const text = vi
@@ -952,23 +665,8 @@ describe("applyAuthChoice", () => {
     );
     const multiselect: WizardPrompter["multiselect"] = vi.fn(async () => []);
     const confirm = vi.fn(async () => true);
-    const prompter: WizardPrompter = {
-      intro: vi.fn(noopAsync),
-      outro: vi.fn(noopAsync),
-      note: vi.fn(noopAsync),
-      select,
-      multiselect,
-      text,
-      confirm,
-      progress: vi.fn(() => ({ update: noop, stop: noop })),
-    };
-    const runtime: RuntimeEnv = {
-      log: vi.fn(),
-      error: vi.fn(),
-      exit: vi.fn((code: number) => {
-        throw new Error(`exit:${code}`);
-      }),
-    };
+    const prompter = createPrompter({ select, multiselect, text, confirm });
+    const runtime = createExitThrowingRuntime();
 
     const result = await applyAuthChoice({
       authChoice: "cloudflare-ai-gateway-api-key",
@@ -992,9 +690,7 @@ describe("applyAuthChoice", () => {
       "cloudflare-ai-gateway/claude-sonnet-4-5",
     );
 
-    const authProfilePath = authProfilePathFor(requireAgentDir());
-    const raw = await fs.readFile(authProfilePath, "utf8");
-    const parsed = JSON.parse(raw) as {
+    const parsed = (await readAuthProfiles()) as {
       profiles?: Record<string, { key?: string; metadata?: Record<string, string> }>;
     };
     expect(parsed.profiles?.["cloudflare-ai-gateway:default"]?.key).toBe("cf-gateway-test-key");
@@ -1007,10 +703,7 @@ describe("applyAuthChoice", () => {
   });
 
   it("writes Chutes OAuth credentials when selecting chutes (remote/manual)", async () => {
-    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-auth-"));
-    process.env.OPENCLAW_STATE_DIR = tempStateDir;
-    process.env.OPENCLAW_AGENT_DIR = path.join(tempStateDir, "agent");
-    process.env.PI_CODING_AGENT_DIR = process.env.OPENCLAW_AGENT_DIR;
+    await setupTempState();
     process.env.SSH_TTY = "1";
     process.env.CHUTES_CLIENT_ID = "cid_test";
 
@@ -1036,28 +729,25 @@ describe("applyAuthChoice", () => {
     });
     vi.stubGlobal("fetch", fetchSpy);
 
-    const text = vi.fn().mockResolvedValue("code_manual");
+    const runtime = createExitThrowingRuntime();
+    const text: WizardPrompter["text"] = vi.fn(async (params) => {
+      if (params.message === "Paste the redirect URL") {
+        const lastLog = runtime.log.mock.calls.at(-1)?.[0];
+        const urlLine = typeof lastLog === "string" ? lastLog : String(lastLog ?? "");
+        const urlMatch = urlLine.match(/https?:\/\/\S+/)?.[0] ?? "";
+        const state = urlMatch ? new URL(urlMatch).searchParams.get("state") : null;
+        if (!state) {
+          throw new Error("missing state in oauth URL");
+        }
+        return `?code=code_manual&state=${state}`;
+      }
+      return "code_manual";
+    });
     const select: WizardPrompter["select"] = vi.fn(
       async (params) => params.options[0]?.value as never,
     );
     const multiselect: WizardPrompter["multiselect"] = vi.fn(async () => []);
-    const prompter: WizardPrompter = {
-      intro: vi.fn(noopAsync),
-      outro: vi.fn(noopAsync),
-      note: vi.fn(noopAsync),
-      select,
-      multiselect,
-      text,
-      confirm: vi.fn(async () => false),
-      progress: vi.fn(() => ({ update: noop, stop: noop })),
-    };
-    const runtime: RuntimeEnv = {
-      log: vi.fn(),
-      error: vi.fn(),
-      exit: vi.fn((code: number) => {
-        throw new Error(`exit:${code}`);
-      }),
-    };
+    const prompter = createPrompter({ select, multiselect, text });
 
     const result = await applyAuthChoice({
       authChoice: "chutes",
@@ -1069,7 +759,7 @@ describe("applyAuthChoice", () => {
 
     expect(text).toHaveBeenCalledWith(
       expect.objectContaining({
-        message: "Paste the redirect URL (or authorization code)",
+        message: "Paste the redirect URL",
       }),
     );
     expect(result.config.auth?.profiles?.["chutes:remote-user"]).toMatchObject({
@@ -1077,9 +767,7 @@ describe("applyAuthChoice", () => {
       mode: "oauth",
     });
 
-    const authProfilePath = authProfilePathFor(requireAgentDir());
-    const raw = await fs.readFile(authProfilePath, "utf8");
-    const parsed = JSON.parse(raw) as {
+    const parsed = (await readAuthProfiles()) as {
       profiles?: Record<
         string,
         { provider?: string; access?: string; refresh?: string; email?: string }
@@ -1094,10 +782,7 @@ describe("applyAuthChoice", () => {
   });
 
   it("writes Qwen credentials when selecting qwen-portal", async () => {
-    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-auth-"));
-    process.env.OPENCLAW_STATE_DIR = tempStateDir;
-    process.env.OPENCLAW_AGENT_DIR = path.join(tempStateDir, "agent");
-    process.env.PI_CODING_AGENT_DIR = process.env.OPENCLAW_AGENT_DIR;
+    await setupTempState();
 
     resolvePluginProviders.mockReturnValue([
       {
@@ -1140,23 +825,8 @@ describe("applyAuthChoice", () => {
       },
     ]);
 
-    const prompter: WizardPrompter = {
-      intro: vi.fn(noopAsync),
-      outro: vi.fn(noopAsync),
-      note: vi.fn(noopAsync),
-      select: vi.fn(async () => "" as never),
-      multiselect: vi.fn(async () => []),
-      text: vi.fn(async () => ""),
-      confirm: vi.fn(async () => false),
-      progress: vi.fn(() => ({ update: noop, stop: noop })),
-    };
-    const runtime: RuntimeEnv = {
-      log: vi.fn(),
-      error: vi.fn(),
-      exit: vi.fn((code: number) => {
-        throw new Error(`exit:${code}`);
-      }),
-    };
+    const prompter = createPrompter({});
+    const runtime = createExitThrowingRuntime();
 
     const result = await applyAuthChoice({
       authChoice: "qwen-portal",
@@ -1176,9 +846,7 @@ describe("applyAuthChoice", () => {
       apiKey: "qwen-oauth",
     });
 
-    const authProfilePath = authProfilePathFor(requireAgentDir());
-    const raw = await fs.readFile(authProfilePath, "utf8");
-    const parsed = JSON.parse(raw) as {
+    const parsed = (await readAuthProfiles()) as {
       profiles?: Record<string, { access?: string; refresh?: string; provider?: string }>;
     };
     expect(parsed.profiles?.["qwen-portal:default"]).toMatchObject({
@@ -1189,10 +857,7 @@ describe("applyAuthChoice", () => {
   });
 
   it("writes MiniMax credentials when selecting minimax-portal", async () => {
-    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-auth-"));
-    process.env.OPENCLAW_STATE_DIR = tempStateDir;
-    process.env.OPENCLAW_AGENT_DIR = path.join(tempStateDir, "agent");
-    process.env.PI_CODING_AGENT_DIR = process.env.OPENCLAW_AGENT_DIR;
+    await setupTempState();
 
     resolvePluginProviders.mockReturnValue([
       {
@@ -1235,23 +900,10 @@ describe("applyAuthChoice", () => {
       },
     ]);
 
-    const prompter: WizardPrompter = {
-      intro: vi.fn(noopAsync),
-      outro: vi.fn(noopAsync),
-      note: vi.fn(noopAsync),
-      select: vi.fn(async () => "oauth" as never),
-      multiselect: vi.fn(async () => []),
-      text: vi.fn(async () => ""),
-      confirm: vi.fn(async () => false),
-      progress: vi.fn(() => ({ update: noop, stop: noop })),
-    };
-    const runtime: RuntimeEnv = {
-      log: vi.fn(),
-      error: vi.fn(),
-      exit: vi.fn((code: number) => {
-        throw new Error(`exit:${code}`);
-      }),
-    };
+    const prompter = createPrompter({
+      select: vi.fn(async () => "oauth" as never) as WizardPrompter["select"],
+    });
+    const runtime = createExitThrowingRuntime();
 
     const result = await applyAuthChoice({
       authChoice: "minimax-portal",
@@ -1271,9 +923,7 @@ describe("applyAuthChoice", () => {
       apiKey: "minimax-oauth",
     });
 
-    const authProfilePath = authProfilePathFor(requireAgentDir());
-    const raw = await fs.readFile(authProfilePath, "utf8");
-    const parsed = JSON.parse(raw) as {
+    const parsed = (await readAuthProfiles()) as {
       profiles?: Record<string, { access?: string; refresh?: string; provider?: string }>;
     };
     expect(parsed.profiles?.["minimax-portal:default"]).toMatchObject({
