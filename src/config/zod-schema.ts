@@ -4,6 +4,7 @@ import { AgentsSchema, AudioSchema, BindingsSchema, BroadcastSchema } from "./zo
 import { ApprovalsSchema } from "./zod-schema.approvals.js";
 import { HexColorSchema, ModelsConfigSchema } from "./zod-schema.core.js";
 import { HookMappingSchema, HooksGmailSchema, InternalHooksSchema } from "./zod-schema.hooks.js";
+import { InstallRecordShape } from "./zod-schema.installs.js";
 import { ChannelsSchema } from "./zod-schema.providers.js";
 import { sensitive } from "./zod-schema.sensitive.js";
 import {
@@ -71,9 +72,28 @@ const MemoryQmdLimitsSchema = z
   })
   .strict();
 
+const MemoryQmdMcporterSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    serverName: z.string().optional(),
+    startDaemon: z.boolean().optional(),
+  })
+  .strict();
+
+const LoggingLevelSchema = z.union([
+  z.literal("silent"),
+  z.literal("fatal"),
+  z.literal("error"),
+  z.literal("warn"),
+  z.literal("info"),
+  z.literal("debug"),
+  z.literal("trace"),
+]);
+
 const MemoryQmdSchema = z
   .object({
     command: z.string().optional(),
+    mcporter: MemoryQmdMcporterSchema.optional(),
     searchMode: z.union([z.literal("query"), z.literal("search"), z.literal("vsearch")]).optional(),
     includeDefaultMemory: z.boolean().optional(),
     paths: z.array(MemoryQmdPathSchema).optional(),
@@ -93,8 +113,17 @@ const MemorySchema = z
   .strict()
   .optional();
 
+const HttpUrlSchema = z
+  .string()
+  .url()
+  .refine((value) => {
+    const protocol = new URL(value).protocol;
+    return protocol === "http:" || protocol === "https:";
+  }, "Expected http:// or https:// URL");
+
 export const OpenClawSchema = z
   .object({
+    $schema: z.string().optional(),
     meta: z
       .object({
         lastTouchedVersion: z.string().optional(),
@@ -159,29 +188,10 @@ export const OpenClawSchema = z
       .optional(),
     logging: z
       .object({
-        level: z
-          .union([
-            z.literal("silent"),
-            z.literal("fatal"),
-            z.literal("error"),
-            z.literal("warn"),
-            z.literal("info"),
-            z.literal("debug"),
-            z.literal("trace"),
-          ])
-          .optional(),
+        level: LoggingLevelSchema.optional(),
         file: z.string().optional(),
-        consoleLevel: z
-          .union([
-            z.literal("silent"),
-            z.literal("fatal"),
-            z.literal("error"),
-            z.literal("warn"),
-            z.literal("info"),
-            z.literal("debug"),
-            z.literal("trace"),
-          ])
-          .optional(),
+        maxFileBytes: z.number().int().positive().optional(),
+        consoleLevel: LoggingLevelSchema.optional(),
         consoleStyle: z
           .union([z.literal("pretty"), z.literal("compact"), z.literal("json")])
           .optional(),
@@ -194,6 +204,15 @@ export const OpenClawSchema = z
       .object({
         channel: z.union([z.literal("stable"), z.literal("beta"), z.literal("dev")]).optional(),
         checkOnStart: z.boolean().optional(),
+        auto: z
+          .object({
+            enabled: z.boolean().optional(),
+            stableDelayHours: z.number().nonnegative().max(168).optional(),
+            stableJitterHours: z.number().nonnegative().max(168).optional(),
+            betaCheckIntervalHours: z.number().positive().max(24).optional(),
+          })
+          .strict()
+          .optional(),
       })
       .strict()
       .optional(),
@@ -211,6 +230,14 @@ export const OpenClawSchema = z
         attachOnly: z.boolean().optional(),
         defaultProfile: z.string().optional(),
         snapshotDefaults: BrowserSnapshotDefaultsSchema,
+        ssrfPolicy: z
+          .object({
+            allowPrivateNetwork: z.boolean().optional(),
+            allowedHostnames: z.array(z.string()).optional(),
+            hostnameAllowlist: z.array(z.string()).optional(),
+          })
+          .strict()
+          .optional(),
         profiles: z
           .record(
             z
@@ -294,6 +321,8 @@ export const OpenClawSchema = z
         enabled: z.boolean().optional(),
         store: z.string().optional(),
         maxConcurrentRuns: z.number().int().positive().optional(),
+        webhook: HttpUrlSchema.optional(),
+        webhookToken: z.string().optional().register(sensitive),
         sessionRetention: z.union([z.string(), z.literal(false)]).optional(),
       })
       .strict()
@@ -384,6 +413,7 @@ export const OpenClawSchema = z
             z.literal("tailnet"),
           ])
           .optional(),
+        customBindHost: z.string().optional(),
         controlUi: z
           .object({
             enabled: z.boolean().optional(),
@@ -397,14 +427,39 @@ export const OpenClawSchema = z
           .optional(),
         auth: z
           .object({
-            mode: z.union([z.literal("token"), z.literal("password")]).optional(),
+            mode: z
+              .union([
+                z.literal("none"),
+                z.literal("token"),
+                z.literal("password"),
+                z.literal("trusted-proxy"),
+              ])
+              .optional(),
             token: z.string().optional().register(sensitive),
             password: z.string().optional().register(sensitive),
             allowTailscale: z.boolean().optional(),
+            rateLimit: z
+              .object({
+                maxAttempts: z.number().optional(),
+                windowMs: z.number().optional(),
+                lockoutMs: z.number().optional(),
+                exemptLoopback: z.boolean().optional(),
+              })
+              .strict()
+              .optional(),
+            trustedProxy: z
+              .object({
+                userHeader: z.string().min(1, "userHeader is required for trusted-proxy mode"),
+                requiredHeaders: z.array(z.string()).optional(),
+                allowUsers: z.array(z.string()).optional(),
+              })
+              .strict()
+              .optional(),
           })
           .strict()
           .optional(),
         trustedProxies: z.array(z.string()).optional(),
+        allowRealIpFallback: z.boolean().optional(),
         tools: z
           .object({
             deny: z.array(z.string()).optional(),
@@ -412,6 +467,7 @@ export const OpenClawSchema = z
           })
           .strict()
           .optional(),
+        channelHealthCheckMinutes: z.number().int().min(0).optional(),
         tailscale: z
           .object({
             mode: z.union([z.literal("off"), z.literal("serve"), z.literal("funnel")]).optional(),
@@ -549,6 +605,16 @@ export const OpenClawSchema = z
           })
           .strict()
           .optional(),
+        limits: z
+          .object({
+            maxCandidatesPerRoot: z.number().int().min(1).optional(),
+            maxSkillsLoadedPerSource: z.number().int().min(1).optional(),
+            maxSkillsInPrompt: z.number().int().min(0).optional(),
+            maxSkillsPromptChars: z.number().int().min(0).optional(),
+            maxSkillFileBytes: z.number().int().min(0).optional(),
+          })
+          .strict()
+          .optional(),
         entries: z
           .record(
             z.string(),
@@ -598,12 +664,7 @@ export const OpenClawSchema = z
             z.string(),
             z
               .object({
-                source: z.union([z.literal("npm"), z.literal("archive"), z.literal("path")]),
-                spec: z.string().optional(),
-                sourcePath: z.string().optional(),
-                installPath: z.string().optional(),
-                version: z.string().optional(),
-                installedAt: z.string().optional(),
+                ...InstallRecordShape,
               })
               .strict(),
           )
